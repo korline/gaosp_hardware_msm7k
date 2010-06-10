@@ -52,5 +52,3 @@ LOCAL_C_INCLUDES += hardware/libhardware/modules/gralloc
 LOCAL_CFLAGS += -DCOPYBIT_QSD8K=1
 include $(BUILD_SHARED_LIBRARY)
 endif
-
-

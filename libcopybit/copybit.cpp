@@ -42,10 +42,8 @@
 
 #if defined(COPYBIT_MSM7K)
 #define MAX_SCALE_FACTOR    (4)
-#define MAX_DIMENSION       (4096)
 #elif defined(COPYBIT_QSD8K)
 #define MAX_SCALE_FACTOR    (8)
-#define MAX_DIMENSION       (2048)
 #else
 #error "Unsupported MDP version"
 #endif
@@ -84,6 +82,22 @@ struct copybit_module_t HAL_MODULE_INFO_SYM = {
         author: "Google, Inc.",
         methods: &copybit_module_methods
     }
+};
+
+struct mdp_blit_req_I7500 {
+ struct mdp_img src;
+ struct mdp_img dst;
+ struct mdp_rect src_rect;
+ struct mdp_rect dst_rect;
+ uint32_t alpha;
+ uint32_t transp_mask;
+ uint32_t flags;
+ int sharpening_strength;  /* -127 <--> 127, default 64 */
+};
+
+struct mdp_blit_req_list_I7500 {
+ uint32_t count;
+ struct mdp_blit_req_I7500 req[];
 };
 
 /******************************************************************************/
@@ -139,7 +153,7 @@ static void set_image(struct mdp_img *img, const struct copybit_image_t *rhs)
     img->format     = get_format(rhs->format);
     img->offset     = hnd->offset;
 #if defined(COPYBIT_MSM7K)
-    if ((hnd->flags & private_handle_t::PRIV_FLAGS_USES_GPU)) {
+    if (hnd->flags & private_handle_t::PRIV_FLAGS_USES_GPU) {
         img->memory_id = hnd->gpu_fd;
         if (img->format == MDP_RGBA_8888) {
             // msm7201A GPU only supports BGRA_8888 destinations
@@ -154,7 +168,7 @@ static void set_image(struct mdp_img *img, const struct copybit_image_t *rhs)
 }
 /** setup rectangles */
 static void set_rects(struct copybit_context_t *dev,
-                      struct mdp_blit_req *e,
+                      struct mdp_blit_req_I7500 *e,
                       const struct copybit_rect_t *dst,
                       const struct copybit_rect_t *src,
                       const struct copybit_rect_t *scissor) {
@@ -193,23 +207,24 @@ static void set_rects(struct copybit_context_t *dev,
 }
 
 /** setup mdp request */
-static void set_infos(struct copybit_context_t *dev, struct mdp_blit_req *req) {
+static void set_infos(struct copybit_context_t *dev, struct mdp_blit_req_I7500 *req) {
     req->alpha = dev->mAlpha;
     req->transp_mask = MDP_TRANSP_NOP;
     req->flags = dev->mFlags | MDP_BLEND_FG_PREMULT;
+    req->sharpening_strength = 64;
 }
 
 /** copy the bits */
 static int msm_copybit(struct copybit_context_t *dev, void const *list) 
 {
     int err = ioctl(dev->mFD, MSMFB_BLIT,
-                    (struct mdp_blit_req_list const*)list);
+                    (struct mdp_blit_req_list_I7500 const*)list);
     LOGE_IF(err<0, "copyBits failed (%s)", strerror(errno));
     if (err == 0) {
         return 0;
     } else {
 #if DEBUG_MDP_ERRORS
-        struct mdp_blit_req_list const* l = (struct mdp_blit_req_list const*)list;
+        struct mdp_blit_req_list_I7500 const* l = (struct mdp_blit_req_list_I7500 const*)list;
         for (int i=0 ; i<l->count ; i++) {
             LOGD("%d: src={w=%d, h=%d, f=%d, rect={%d,%d,%d,%d}}\n"
                  "    dst={w=%d, h=%d, f=%d, rect={%d,%d,%d,%d}}\n"
@@ -348,7 +363,7 @@ static int stretch_copybit(
     if (ctx) {
         struct {
             uint32_t count;
-            struct mdp_blit_req req[12];
+            struct mdp_blit_req_I7500 req[12];
         } list;
 
         if (ctx->mAlpha < 255) {
@@ -365,14 +380,8 @@ static int stretch_copybit(
         if (src_rect->l < 0 || src_rect->r > src->w ||
             src_rect->t < 0 || src_rect->b > src->h) {
             // this is always invalid
-            return -EINVAL;
+            //return -EINVAL;
         }
-
-// musty : remove MAX_DIMENSION check
-//        if (src->w > MAX_DIMENSION || src->h > MAX_DIMENSION)
-//           return -EINVAL;
-//        if (dst->w > MAX_DIMENSION || dst->h > MAX_DIMENSION)
-//            return -EINVAL;
 
         const uint32_t maxCount = sizeof(list.req)/sizeof(list.req[0]);
         const struct copybit_rect_t bounds = { 0, 0, dst->w, dst->h };
@@ -381,7 +390,7 @@ static int stretch_copybit(
         status = 0;
         while ((status == 0) && region->next(region, &clip)) {
             intersect(&clip, &bounds, &clip);
-            mdp_blit_req* req = &list.req[list.count];
+            mdp_blit_req_I7500* req = &list.req[list.count];
             set_infos(ctx, req);
             set_image(&req->dst, dst);
             set_image(&req->src, src);
@@ -461,12 +470,11 @@ static int open_copybit(const struct hw_module_t* module, const char* name,
     } else {
         struct fb_fix_screeninfo finfo;
         if (ioctl(ctx->mFD, FBIOGET_FSCREENINFO, &finfo) == 0) {
-// musty
-             if (strncmp(finfo.id, "msmfb", 5) == 0) {
+            if (strncmp(finfo.id, "msmfb", 5) == 0) {
                 /* Success */
                 status = 0;
             } else {
-                LOGE("Error not msm frame buffer : %s",finfo.id);
+                LOGE("Error not msm frame buffer");
                 status = -EINVAL;
             }
         } else {
