@@ -376,9 +376,9 @@ namespace android {
 #if DLOPEN_LIBQCAMERA == 1
 
             LOGV("loading libqcamera");
-            libqcamera = ::dlopen("liboemcamera.so", RTLD_NOW);
+            libqcamera = ::dlopen("libmm-qcamera-tgt.so", RTLD_NOW);
             if (!libqcamera) {
-                LOGE("FATAL ERROR: could not dlopen liboemcamera.so: %s", dlerror());
+                LOGE("FATAL ERROR: could not dlopen libmm-qcamera-tgt.so: %s", dlerror());
                 return;
             }
   

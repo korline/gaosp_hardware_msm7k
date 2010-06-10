@@ -27,7 +27,7 @@ extern "C" {
 #include <media/msm_camera.h>
 }
 
-#define MSM_CAMERA_CONTROL "/dev/msm_camera/control0"
+#define MSM_CAMERA_CONTROL "/dev/msm_camera0" // fix samsung Galaxy
 #define JPEG_EVENT_DONE 0 /* guess */
 
 #define CAM_CTRL_SUCCESS 1
@@ -177,7 +177,6 @@ public:
     void receiveJpegPicture(void);
     void jpeg_set_location();
     void receiveJpegPictureFragment(uint8_t *buf, uint32_t size);
-    void notifyShutter();
 
 private:
     QualcommCameraHardware();
@@ -267,7 +266,7 @@ private:
     sp<PmemPool> mRawHeap;
     sp<AshmemPool> mJpegHeap;
 
-    void startCamera();
+    bool startCamera();
     bool initPreview();
     void deinitPreview();
     bool initRaw(bool initJpegHeap);
@@ -279,8 +278,6 @@ private:
     friend void *frame_thread(void *user);
     void runFrameThread(void *data);
 
-    bool mShutterPending;
-    Mutex mShutterLock;
 
     bool mSnapshotThreadRunning;
     Mutex mSnapshotThreadWaitLock;
@@ -324,6 +321,7 @@ private:
 
 #if DLOPEN_LIBMMCAMERA
     void *libmmcamera;
+    void *libmmcamera_target;
 #endif
 
     int mCameraControlFd;

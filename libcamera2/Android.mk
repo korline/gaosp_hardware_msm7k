@@ -1,3 +1,4 @@
+#ifeq ($(BOARD_USES_OLD_CAMERA_HACK),true)
 BUILD_LIBCAMERA:= true
 ifeq ($(BUILD_LIBCAMERA),true)
 
@@ -23,7 +24,7 @@ LOCAL_C_INCLUDES+= \
 LOCAL_SHARED_LIBRARIES:= libbinder libutils libui liblog
 
 ifneq ($(DLOPEN_LIBMMCAMERA),1)
-LOCAL_SHARED_LIBRARIES+= libqcamera
+LOCAL_SHARED_LIBRARIES+= libmmcamera libmm-qcamera-tgt
 else
 LOCAL_SHARED_LIBRARIES+= libdl
 endif
@@ -33,3 +34,4 @@ include $(BUILD_SHARED_LIBRARY)
 
 endif # BUILD_TINY_ANDROID
 endif # BUILD_LIBCAMERA
+#endif # BOARD_USES_OLD_CAMERA_HACK

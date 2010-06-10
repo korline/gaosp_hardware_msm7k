@@ -58,8 +58,8 @@ extern "C" {
 #define THUMBNAIL_HEIGHT       384
 #define THUMBNAIL_WIDTH_STR   "512"
 #define THUMBNAIL_HEIGHT_STR  "384"
-#define DEFAULT_PICTURE_WIDTH  2048 // 1280
-#define DEFAULT_PICTURE_HEIGHT 1536 // 768
+#define DEFAULT_PICTURE_WIDTH  2560 // Default size : Galaxy
+#define DEFAULT_PICTURE_HEIGHT 1920 // Galaxy
 #define THUMBNAIL_BUFFER_SIZE (THUMBNAIL_WIDTH * THUMBNAIL_HEIGHT * 3/2)
 
 #define DEFAULT_PREVIEW_SETTING 2 // HVGA
@@ -78,17 +78,18 @@ bool  (*LINK_jpeg_encoder_encode)(const cam_ctrl_dimension_t *dimen,
                                   const uint8_t *thumbnailbuf, int thumbnailfd,
                                   const uint8_t *snapshotbuf, int snapshotfd,
                                   common_crop_t *scaling_parms);
-int  (*LINK_camframe_terminate)(void);
+void  (*LINK_camframe_terminate)(void);
 int8_t (*LINK_jpeg_encoder_setMainImageQuality)(uint32_t quality);
 int8_t (*LINK_jpeg_encoder_setThumbnailQuality)(uint32_t quality);
 int8_t (*LINK_jpeg_encoder_setRotation)(uint32_t rotation);
 int8_t (*LINK_jpeg_encoder_setLocation)(const camera_position_type *location);
+//int (*LINK_launch_cam_conf_thread)(void);
+//int (*LINK_release_cam_conf_thread)(void);
 // callbacks
 void  (**LINK_mmcamera_camframe_callback)(struct msm_frame *frame);
 void  (**LINK_mmcamera_jpegfragment_callback)(uint8_t *buff_ptr,
                                               uint32_t buff_size);
 void  (**LINK_mmcamera_jpeg_callback)(jpeg_event_t status);
-void  (**LINK_mmcamera_shutter_callback)();
 #else
 #define LINK_cam_conf cam_conf
 #define LINK_cam_frame cam_frame
@@ -100,11 +101,12 @@ void  (**LINK_mmcamera_shutter_callback)();
 #define LINK_jpeg_encoder_setThumbnailQuality jpeg_encoder_setThumbnailQuality
 #define LINK_jpeg_encoder_setRotation jpeg_encoder_setRotation
 #define LINK_jpeg_encoder_setLocation jpeg_encoder_setLocation
+//#define LINK_launch_cam_conf_thread launch_cam_conf_thread
+//#define LINK_release_cam_conf_thread release_cam_conf_thread
 extern void (*mmcamera_camframe_callback)(struct msm_frame *frame);
 extern void (*mmcamera_jpegfragment_callback)(uint8_t *buff_ptr,
                                       uint32_t buff_size);
 extern void (*mmcamera_jpeg_callback)(jpeg_event_t status);
-extern void (*mmcamera_shutter_callback)();
 #endif
 
 } // extern "C"
@@ -210,7 +212,14 @@ static Condition singleton_wait;
 static void receive_camframe_callback(struct msm_frame *frame);
 static void receive_jpeg_fragment_callback(uint8_t *buff_ptr, uint32_t buff_size);
 static void receive_jpeg_callback(jpeg_event_t status);
-static void receive_shutter_callback();
+
+static int camerafd;
+pthread_t w_thread;
+
+void *opencamerafd(void *data) {
+    camerafd = open(MSM_CAMERA_CONTROL, O_RDWR); //DEVFLAG300 Semblerai que le cameracontrol soit pas bon. Donc le camfd reste a -1 comme défini plus bas.
+    return NULL;
+}
 
 QualcommCameraHardware::QualcommCameraHardware()
     : mParameters(),
@@ -236,6 +245,15 @@ QualcommCameraHardware::QualcommCameraHardware()
       mInPreviewCallback(false),
       mCameraRecording(false)
 {
+
+    // Start opening camera device in a separate thread/ Since this
+    // initializes the sensor hardware, this can take a long time. So,
+    // start the process here so it will be ready by the time it's
+    // needed.
+    if ((pthread_create(&w_thread, NULL, opencamerafd, NULL)) != 0) {
+        LOGE("Camera open thread creation failed");
+    }
+
     memset(&mDimension, 0, sizeof(mDimension));
     memset(&mCrop, 0, sizeof(mCrop));
     LOGV("constructor EX");
@@ -243,6 +261,7 @@ QualcommCameraHardware::QualcommCameraHardware()
 
 void QualcommCameraHardware::initDefaultParameters()
 {
+    LOGD("Dev Flag: 20");
     CameraParameters p;
 
     LOGV("initDefaultParameters E");
@@ -262,6 +281,7 @@ void QualcommCameraHardware::initDefaultParameters()
     p.set("antibanding", "off");
     p.set("effect", "none");
     p.set("whitebalance", "auto");
+    LOGD("Dev Flag: 21");
 
 #if 0
     p.set("gps-timestamp", "1199145600"); // Jan 1, 2008, 00:00:00
@@ -275,6 +295,7 @@ void QualcommCameraHardware::initDefaultParameters()
     INIT_VALUES_FOR(antibanding);
     INIT_VALUES_FOR(effect);
     INIT_VALUES_FOR(whitebalance);
+    LOGD("Dev Flag: 22"); //DEVFLAG400 Plante ici, l'application freeze. Pas de log après le 22
 
     p.set("antibanding-values", antibanding_values);
     p.set("effect-values", effect_values);
@@ -284,6 +305,7 @@ void QualcommCameraHardware::initDefaultParameters()
     if (setParameters(p) != NO_ERROR) {
         LOGE("Failed to set default parameters?!");
     }
+    LOGD("Dev Flag: 23");
 
     LOGV("initDefaultParameters X");
 }
@@ -321,85 +343,113 @@ bool QualcommCameraHardware::msgTypeEnabled(int32_t msgType)
 
 #define ROUND_TO_PAGE(x)  (((x)+0xfff)&~0xfff)
 
-void QualcommCameraHardware::startCamera()
+bool QualcommCameraHardware::startCamera()
 {
     LOGV("startCamera E");
+    
 #if DLOPEN_LIBMMCAMERA
-    libmmcamera = ::dlopen("libqcamera.so", RTLD_NOW);
-    LOGV("loading libqcamera at %p", libmmcamera);
+	
+    libmmcamera = ::dlopen("libmmcamera.so", RTLD_NOW);
+    LOGV("loading libmmcamera at %p", libmmcamera);
     if (!libmmcamera) {
-        LOGE("FATAL ERROR: could not dlopen libqcamera.so: %s", dlerror());
-        return;
+        LOGE("FATAL ERROR: could not dlopen libmmcamera.so: %s", dlerror());
+        return false;
     }
-
+    
+    libmmcamera_target = ::dlopen("libmm-qcamera-tgt.so", RTLD_NOW);
+    LOGV("loading libmm-qcamera-tgt at %p", libmmcamera_target);
+	if (!libmmcamera_target) {
+		LOGE("FATAL ERROR: could not dlopen libmm-qcamera-tgt.so: %s", dlerror());
+		return false;
+	}
+	
+	/*
+	*(void **)&LINK_cam_conf =
+		::dlsym(libmmcamera_target, "cam_conf"); // Test libmmcamera
+		*/
+	
     *(void **)&LINK_cam_frame =
         ::dlsym(libmmcamera, "cam_frame");
     *(void **)&LINK_camframe_terminate =
         ::dlsym(libmmcamera, "camframe_terminate");
-
+	
     *(void **)&LINK_jpeg_encoder_init =
         ::dlsym(libmmcamera, "jpeg_encoder_init");
-
+	
     *(void **)&LINK_jpeg_encoder_encode =
         ::dlsym(libmmcamera, "jpeg_encoder_encode");
-
+	
     *(void **)&LINK_jpeg_encoder_join =
         ::dlsym(libmmcamera, "jpeg_encoder_join");
-
+	
     *(void **)&LINK_mmcamera_camframe_callback =
-        ::dlsym(libmmcamera, "mmcamera_camframe_callback");
-
-    *LINK_mmcamera_camframe_callback = receive_camframe_callback;
-
+        ::dlsym(libmmcamera, "camframe_callback"); // Fix Galaxy
+	LOGD("Dev Flag: 95");
+    *LINK_mmcamera_camframe_callback = receive_camframe_callback; // Plante application camera ici
+	LOGD("Dev Flag: 97");
     *(void **)&LINK_mmcamera_jpegfragment_callback =
-        ::dlsym(libmmcamera, "mmcamera_jpegfragment_callback");
-
+        ::dlsym(libmmcamera, "jpegfragment_callback"); // Fix Galaxy
+	LOGD("Dev Flag: 98");
     *LINK_mmcamera_jpegfragment_callback = receive_jpeg_fragment_callback;
-
+	LOGD("Dev Flag: 99");
     *(void **)&LINK_mmcamera_jpeg_callback =
-        ::dlsym(libmmcamera, "mmcamera_jpeg_callback");
-
+        ::dlsym(libmmcamera, "jpeg_callback"); // Fix Galaxy
+	LOGD("Dev Flag: 100");
     *LINK_mmcamera_jpeg_callback = receive_jpeg_callback;
-
-    *(void **)&LINK_mmcamera_shutter_callback =
-        ::dlsym(libmmcamera, "mmcamera_shutter_callback");
-
-    *LINK_mmcamera_shutter_callback = receive_shutter_callback;
-
+	LOGD("Dev Flag: 103");
     *(void**)&LINK_jpeg_encoder_setMainImageQuality =
         ::dlsym(libmmcamera, "jpeg_encoder_setMainImageQuality");
-
+	LOGD("Dev Flag: 104");
     *(void**)&LINK_jpeg_encoder_setThumbnailQuality =
         ::dlsym(libmmcamera, "jpeg_encoder_setThumbnailQuality");
-
+	LOGD("Dev Flag: 105");
     *(void**)&LINK_jpeg_encoder_setRotation =
         ::dlsym(libmmcamera, "jpeg_encoder_setRotation");
-
+	LOGD("Dev Flag: 106");
     *(void**)&LINK_jpeg_encoder_setLocation =
         ::dlsym(libmmcamera, "jpeg_encoder_setLocation");
-
+    LOGD("Dev Flag: 107");
     *(void **)&LINK_cam_conf =
-        ::dlsym(libmmcamera, "cam_conf");
+        ::dlsym(libmmcamera_target, "cam_conf");
+	LOGD("Dev Flag: 108");
+    /**(void **)&LINK_launch_cam_conf_thread =
+        ::dlsym(libmmcamera_target, "launch_cam_conf_thread");
+	LOGD("Dev Flag: 109");
+    *(void **)&LINK_release_cam_conf_thread =
+        ::dlsym(libmmcamera_target, "release_cam_conf_thread");*/
+	LOGD("Dev Flag: 10");
 #else
     mmcamera_camframe_callback = receive_camframe_callback;
     mmcamera_jpegfragment_callback = receive_jpeg_fragment_callback;
     mmcamera_jpeg_callback = receive_jpeg_callback;
-    mmcamera_shutter_callback = receive_shutter_callback;
+    LOGD("Dev Flag: 11");
 #endif // DLOPEN_LIBMMCAMERA
 
     /* The control thread is in libcamera itself. */
-    mCameraControlFd = open(MSM_CAMERA_CONTROL, O_RDWR);
+    if (pthread_join(w_thread, NULL) != 0) {
+        LOGE("Camera open thread exit failed");
+        return false;
+    }
+    LOGD("Dev Flag: 12");
+    mCameraControlFd = camerafd; // need mount on /dev/msm_camera0
+
     if (mCameraControlFd < 0) {
         LOGE("startCamera X: %s open failed: %s!",
              MSM_CAMERA_CONTROL,
              strerror(errno));
-        return;
+        return false;
     }
-
-    pthread_create(&mCamConfigThread, NULL,
-                   LINK_cam_conf, NULL);
+	LOGD("Dev Flag: 13");
+    /* This will block until the control thread is launched. After that, sensor
+     * information becomes available.
+     */
+    /*if (LINK_launch_cam_conf_thread()) {
+        LOGE("failed to launch the camera config thread");
+        return false;
+    }*/
 
     LOGV("startCamera X");
+    return true;
 }
 
 status_t QualcommCameraHardware::dump(int fd,
@@ -468,7 +518,7 @@ static bool native_cancel_afmode(int camfd, int af_fd)
     ctrlCmd.length = 0;
     ctrlCmd.resp_fd = af_fd;
 
-    if ((rc = ioctl(camfd, MSM_CAM_IOCTL_CTRL_COMMAND_2, &ctrlCmd)) < 0)
+    if ((rc = ioctl(camfd, MSM_CAM_IOCTL_CTRL_COMMAND, &ctrlCmd)) < 0)
         LOGE("native_cancel_afmode: ioctl fd %d error %s\n",
              camfd,
              strerror(errno));
@@ -649,7 +699,7 @@ bool QualcommCameraHardware::native_set_parm(
     LOGV("native_set_parm. camfd=%d, type=%d, length=%d",
          mCameraControlFd, type, length);
     rc = ioctl(mCameraControlFd, MSM_CAM_IOCTL_CTRL_COMMAND, &ctrlCmd);
-    if(rc < 0 || ctrlCmd.status != CAM_CTRL_SUCCESS) {
+    if(rc < 0 || ctrlCmd.status != CAM_CTRL_SUCCESS) { // CAM_CTRL in camera target
         LOGE("ioctl error. camfd=%d, type=%d, length=%d, rc=%d, ctrlCmd.status=%d, %s",
              mCameraControlFd, type, length, rc, ctrlCmd.status, strerror(errno));
         return false;
@@ -708,14 +758,14 @@ void QualcommCameraHardware::runFrameThread(void *data)
     int cnt;
 
 #if DLOPEN_LIBMMCAMERA
-    // We need to maintain a reference to libqcamera.so for the duration of the
+    // We need to maintain a reference to libmm-qcamera-tgt.so for the duration of the
     // frame thread, because we do not know when it will exit relative to the
     // lifetime of this object.  We do not want to dlclose() libqcamera while
     // LINK_cam_frame is still running.
-    void *libhandle = ::dlopen("libqcamera.so", RTLD_NOW);
-    LOGV("FRAME: loading libqcamera at %p", libhandle);
+    void *libhandle = ::dlopen("libmmcamera.so", RTLD_NOW);
+    LOGV("FRAME: loading libmmcamera at %p", libhandle);
     if (!libhandle) {
-        LOGE("FATAL ERROR: could not dlopen libqcamera.so: %s", dlerror());
+        LOGE("FATAL ERROR: could not dlopen libmmcamera.so: %s", dlerror());
     }
     if (libhandle)
 #endif
@@ -728,7 +778,7 @@ void QualcommCameraHardware::runFrameThread(void *data)
 #if DLOPEN_LIBMMCAMERA
     if (libhandle) {
         ::dlclose(libhandle);
-        LOGV("FRAME: dlclose(libqcamera)");
+        LOGV("FRAME: dlclose(libmmcamera)");
     }
 #endif
 
@@ -840,9 +890,7 @@ void QualcommCameraHardware::deinitPreview(void)
     // the frame-thread's callback.  This we have to make the frame thread
     // detached, and use a separate mechanism to wait for it to complete.
 
-    if (LINK_camframe_terminate() < 0)
-        LOGE("failed to stop the camframe thread: %s",
-             strerror(errno));
+    LINK_camframe_terminate();
     LOGI("deinitPreview X");
 }
 
@@ -991,12 +1039,8 @@ void QualcommCameraHardware::release()
     if (ioctl(mCameraControlFd, MSM_CAM_IOCTL_CTRL_COMMAND, &ctrlCmd) < 0)
         LOGE("ioctl CAMERA_EXIT fd %d error %s",
              mCameraControlFd, strerror(errno));
-    rc = pthread_join(mCamConfigThread, NULL);
-    if (rc)
-        LOGE("config_thread exit failure: %s", strerror(errno));
-    else
-        LOGV("pthread_join succeeded on config_thread");
 
+    //LINK_release_cam_conf_thread();
     close(mCameraControlFd);
     mCameraControlFd = -1;
 
@@ -1119,14 +1163,14 @@ void QualcommCameraHardware::runAutoFocus()
     }
 
 #if DLOPEN_LIBMMCAMERA
-    // We need to maintain a reference to libqcamera.so for the duration of the
+    // We need to maintain a reference to libmm-qcamera-tgt.so for the duration of the
     // AF thread, because we do not know when it will exit relative to the
     // lifetime of this object.  We do not want to dlclose() libqcamera while
     // LINK_cam_frame is still running.
-    void *libhandle = ::dlopen("libqcamera.so", RTLD_NOW);
+    void *libhandle = ::dlopen("libmmcamera.so", RTLD_NOW);
     LOGV("AF: loading libqcamera at %p", libhandle);
     if (!libhandle) {
-        LOGE("FATAL ERROR: could not dlopen libqcamera.so: %s", dlerror());
+        LOGE("FATAL ERROR: could not dlopen libmmcamera.so: %s", dlerror());
         close(mAutoFocusFd);
         mAutoFocusFd = -1;
         mAutoFocusThreadRunning = false;
@@ -1268,9 +1312,6 @@ status_t QualcommCameraHardware::takePicture()
         return UNKNOWN_ERROR;
     }
 
-    mShutterLock.lock();
-    mShutterPending = true;
-    mShutterLock.unlock();
 
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -1408,6 +1449,7 @@ sp<CameraHardwareInterface> QualcommCameraHardware::createInstance()
     singleton = hardware;
 
     cam->startCamera();
+    LOGD("Dev Flag: 5");
     cam->initDefaultParameters();
     LOGD("createInstance: X created hardware=%p", &(*hardware));
     return hardware;
@@ -1416,20 +1458,24 @@ sp<CameraHardwareInterface> QualcommCameraHardware::createInstance()
 // For internal use only, hence the strong pointer to the derived type.
 sp<QualcommCameraHardware> QualcommCameraHardware::getInstance()
 {
+    LOGD("Dev Flag: 210");
     sp<CameraHardwareInterface> hardware = singleton.promote();
+    LOGD("Dev Flag: 211");
     if (hardware != 0) {
         //    LOGV("getInstance: X old instance of hardware");
+        LOGD("Dev Flag: 212");
         return sp<QualcommCameraHardware>(static_cast<QualcommCameraHardware*>(hardware.get()));
     } else {
         LOGV("getInstance: X new instance of hardware");
         return sp<QualcommCameraHardware>();
     }
+    LOGD("Dev Flag: 213");
 }
 
 void QualcommCameraHardware::receivePreviewFrame(struct msm_frame *frame)
 {
 //    LOGV("receivePreviewFrame E");
-
+	LOGD("Dev Flag: 220");
     if (!mCameraRunning) {
         LOGE("ignoring preview callback--camera has been stopped");
         return;
@@ -1442,28 +1488,36 @@ void QualcommCameraHardware::receivePreviewFrame(struct msm_frame *frame)
     recording_callback rcb = mRecordingCallback;
     void *rdata = mRecordingCallbackCookie;
     mCallbackLock.unlock(); */
-
+	LOGD("Dev Flag: 220-1");
     // Find the offset within the heap of the current buffer.
     ssize_t offset =
         (ssize_t)frame->buffer - (ssize_t)mPreviewHeap->mHeap->base();
+        LOGD("Dev Flag: 220-2");
     offset /= mPreviewFrameSize;
 
     //LOGV("%d\n", offset);
-
+	LOGD("Dev Flag: 221");
     mInPreviewCallback = true;
-    if (mMsgEnabled & CAMERA_MSG_PREVIEW_FRAME)
+    if (mMsgEnabled & CAMERA_MSG_PREVIEW_FRAME){
+    	LOGD("Dev Flag: 221-1");
         mDataCb(CAMERA_MSG_PREVIEW_FRAME, mPreviewHeap->mBuffers[offset], mCallbackCookie);
-
+		LOGD("Dev Flag: 222");
+    	}
+    LOGD("Dev Flag: 223");
     if (mMsgEnabled & CAMERA_MSG_VIDEO_FRAME) {
+    	LOGD("Dev Flag: 223-1");
         Mutex::Autolock rLock(&mRecordFrameLock);
+        LOGD("Dev Flag: 223-2");
         mDataCbTimestamp(systemTime(), CAMERA_MSG_VIDEO_FRAME, mPreviewHeap->mBuffers[offset], mCallbackCookie); /* guess? */
         //mDataCb(CAMERA_MSG_VIDEO_FRAME, mPreviewHeap->mBuffers[offset], mCallbackCookie);
+        LOGD("Dev Flag: 224");
 
         if (mReleasedRecordingFrame != true) {
             LOGV("block for release frame request/command");
             mRecordWait.wait(mRecordFrameLock);
         }
         mReleasedRecordingFrame = false;
+        LOGD("Dev Flag: 225");
     }
 
     /*if(mMsgEnabled & CAMERA_MSG_VIDEO_IMAGE) {
@@ -1475,6 +1529,7 @@ void QualcommCameraHardware::receivePreviewFrame(struct msm_frame *frame)
         }
         mReleasedRecordingFrame = false;
     }*/
+    LOGD("Dev Flag: 226");
     mInPreviewCallback = false;
 
 //    LOGV("receivePreviewFrame X");
@@ -1530,26 +1585,6 @@ bool QualcommCameraHardware::recordingEnabled()
     return (mCameraRunning && mCameraRecording);
 }
 
-void QualcommCameraHardware::notifyShutter()
-{
-    mShutterLock.lock();
-    if (mShutterPending && (mMsgEnabled & CAMERA_MSG_SHUTTER)) {
-        mNotifyCb(CAMERA_MSG_SHUTTER, 0, 0, mCallbackCookie);
-        mShutterPending = false;
-    }
-    mShutterLock.unlock();
-}
-
-static void receive_shutter_callback()
-{
-    LOGV("receive_shutter_callback: E");
-    sp<QualcommCameraHardware> obj = QualcommCameraHardware::getInstance();
-    if (obj != 0) {
-        obj->notifyShutter();
-    }
-    LOGV("receive_shutter_callback: X");
-}
-
 void QualcommCameraHardware::receiveRawPicture()
 {
     LOGV("receiveRawPicture: E");
@@ -1562,7 +1597,6 @@ void QualcommCameraHardware::receiveRawPicture()
 
         // By the time native_get_picture returns, picture is taken. Call
         // shutter callback if cam config thread has not done that.
-        notifyShutter();
         mDataCb(CAMERA_MSG_RAW_IMAGE, mRawHeap->mBuffers[0], mCallbackCookie);
     }
     else LOGV("Raw-picture callback was canceled--skipping.");
@@ -1755,6 +1789,16 @@ QualcommCameraHardware::PmemPool::PmemPool(const char *pmem_pool,
          pmem_pool, num_buffers, frame_size, frame_offset,
          buffer_size);
 
+    if( mCameraControlFd == 0 ) {
+          /* This should not happen. But if and when it
+          * happens, we should not be using fd 0 for issuing
+          * any IOCTL calls to camera driver since the
+          * behaviour is undeterministic. Hence adding a
+          * workaround to deal with this issue */
+            LOGD(" 'dup'ed FD is 0....dup again ");
+            mCameraControlFd = dup(camera_control_fd);
+        }
+
     LOGV("%s: duplicating control fd %d --> %d",
          __FUNCTION__,
          camera_control_fd, mCameraControlFd);
@@ -1850,6 +1894,11 @@ static bool register_buf(int camfd,
     pmemBuf.cbcr_off = size * 2 / 3; //PAD_TO_WORD(size * 2 / 3);
     pmemBuf.active   = true;
 
+    if(pmem_type == MSM_PMEM_RAW_MAINIMG)
+        pmemBuf.cbcr_off = 0;
+    else
+        pmemBuf.cbcr_off = ((size * 2 / 3) + 1) & ~1;
+
     LOGV("register_buf: camfd = %d, reg = %d buffer = %p",
          camfd, !register_buffer, buf);
     if (ioctl(camfd,
@@ -1857,7 +1906,7 @@ static bool register_buf(int camfd,
               MSM_CAM_IOCTL_REGISTER_PMEM :
               MSM_CAM_IOCTL_UNREGISTER_PMEM,
               &pmemBuf) < 0) {
-        LOGE("register_buf: MSM_CAM_IOCTL_(UN)REGISTER_PMEM fd %d error %s",
+        LOGE("register_buf: MSM_CAM_IOCTL_(UN)REGISTER_PMEM fd %d error %s", // need kernel fixe on pmem device (galaxy)
              camfd,
              strerror(errno));
         return false;
@@ -1890,12 +1939,17 @@ status_t QualcommCameraHardware::MemPool::dump(int fd, const Vector<String16>& a
     return NO_ERROR;
 }
 
-static void receive_camframe_callback(struct msm_frame *frame)
+static void receive_camframe_callback(struct msm_frame *frame) // receveive camframe from libmmcamera
 {
+    LOGD("Dev Flag: 201");
     sp<QualcommCameraHardware> obj = QualcommCameraHardware::getInstance();
+    LOGD("Dev Flag: 202");
     if (obj != 0) {
+    	LOGD("Dev Flag: 203");
         obj->receivePreviewFrame(frame);
+        LOGD("Dev Flag: 204");
     }
+    LOGD("Dev Flag: 205");
 }
 
 static void receive_jpeg_fragment_callback(uint8_t *buff_ptr, uint32_t buff_size)
